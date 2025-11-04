@@ -45,7 +45,7 @@ def data_split_by_p_factor(aggregate=True, target_column="p_factor", n_bins= 20)
     """
 
     if aggregate:
-        merged_data_df = pd.read_csv("merged_data_aggregated.csv")
+        merged_data_df = pd.read_csv("posteda.csv")
     else:
         merged_data_df = load_data_from_zarr("merged_data.zarr")
 

@@ -4,9 +4,11 @@ import pandas as pd
 import numpy as np
 import csv
 import zarr
+import dask.dataframe as dd
 import gc # Import for garbage collection
 # Note: You may need to install 'fastparquet' or 'pyarrow' for to_parquet/read_parquet: pip install fastparquet
 # Note: xarray library is also needed for the Zarr conversion.
+# Note: You must install dask and the appropriate file system libraries (pip install dask[complete])
 
 def load_fsdata(participant_id, local_cache_dir):
     """
@@ -106,26 +108,50 @@ def merge_data(aggregate):
             # Manually trigger garbage collection after processing each participant
             del subject_df 
             gc.collect() 
+        
+    if processed_files:
+        print("\nReading temporary Parquet files and concatenating using Dask...")
+        
+        # Use Dask to read all Parquet files into a single Dask DataFrame (lazily)
+        # Dask automatically handles reading multiple files that match the pattern.
+        # We use glob to read all the files saved in the temp directory.
+        brain_scan_data_ddf = dd.read_parquet(str(temp_parquet_dir / '*.parquet'))
+        
+        # Convert demographic data to Dask DataFrame for merging
+        demographic_data_ddf = dd.from_pandas(demographic_data, npartitions=1)
+        
+        # Perform the merge using Dask (still lazy)
+        # Merge key is 'subject_id' for brain data, and 'participant_id' for demographics
+        demographic_data_ddf.rename(columns={'participant_id': 'subject_id'}, inplace=True)
+        merged_df_ddf = dd.merge(
+            demographic_data_ddf, 
+            brain_scan_data_ddf, 
+            on='subject_id',
+            how='left' # Assuming you want to keep all participants from demographic_data
+        )
+        
+    else:
+        print("No brain scan data was loaded. Cannot merge.")
+        return None
+        
+    # Clean up temporary files (moved up before the final computation)
+    for f in temp_parquet_dir.glob("*.parquet"):
+        f.unlink()
+    temp_parquet_dir.rmdir()
+    print("Cleaned up temporary files.")
 
-        # Efficiently read all temporary files into one DataFrame
-        if processed_files:
-            print("\nReading temporary Parquet files and concatenating...")
-            brain_scan_data = pd.concat(
-                [pd.read_parquet(f) for f in processed_files], 
-                ignore_index=True
-            )
-        else:
-            print("No brain scan data was loaded. Cannot merge.")
-            return None
-            
-        # Clean up temporary files
-        for f in temp_parquet_dir.glob("*.parquet"):
-            f.unlink()
-        temp_parquet_dir.rmdir()
-        print("Cleaned up temporary files.")
-
-        # Align the demographic merge key with the loaded brain scan data key
-        demographic_data.rename(columns={'participant_id': 'subject_id'}, inplace=True)
+    # Trigger computation and save to Zarr using Dask (out-of-core)
+    zarr_path = 'merged_data.zarr'
+    print(f"Starting final computation and saving to Zarr at {zarr_path}...")
+    
+    # Dask can write directly to Zarr without an intermediate Xarray step
+    merged_df_ddf.to_zarr(zarr_path, compute=True, overwrite=True)
+    print(f"\nSuccessfully merged and saved data to: {zarr_path} (Zarr)")
+    
+    # We cannot return the full pandas df because it would still OOM. 
+    # Instead, return a smaller Dask object or None.
+    print("Returning None as the final DataFrame is too large for memory.")
+    return None
         
     # --- Final Merge ---
     
