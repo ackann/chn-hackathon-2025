@@ -1,10 +1,12 @@
 from rbclib import RBCPath
 from pathlib import Path 
 import pandas as pd
-import numpy as np # (Though not strictly used, keeping for completeness)
-import csv # (Though not strictly used, keeping for completeness)
+import numpy as np
+import csv
 import zarr
-# Note: The zarr library must be installed (pip install zarr)
+import gc # Import for garbage collection
+# Note: You may need to install 'fastparquet' or 'pyarrow' for to_parquet/read_parquet: pip install fastparquet
+# Note: xarray library is also needed for the Zarr conversion.
 
 def load_fsdata(participant_id, local_cache_dir):
     """
@@ -52,50 +54,86 @@ def merge_data(aggregate):
         print(f"Error: The file {train_filepath} was not found.")
         return None
 
-    # Check if participant_id exists
+    # Check if participant_id exists and convert to integer
     if 'participant_id' not in demographic_data.columns:
         print("Error: 'participant_id' column not found in demographic data.")
         return None
+    try:
+        demographic_data['participant_id'] = demographic_data['participant_id'].astype('int64')
+    except ValueError as e:
+        print(f"Error converting 'participant_id' to integer in demographic data: {e}")
+        return None
         
-    # Initialize a list to collect brain scan DataFrames
-    brain_scan_data_list = []
+    # Initialize a list to collect brain scan DataFrames (only used in AGGREGATE mode for loading)
+    brain_scan_data = None 
 
     if aggregate:
         # Load pre-aggregated data
         try:
             with open('aggregated_brain_scan_data.csv', mode='r') as f:
                 brain_scan_data = pd.read_csv(f)
+                
+            # Ensure aggregated ID column is integer
+            if 'participant_id' in brain_scan_data.columns:
+                brain_scan_data['participant_id'] = brain_scan_data['participant_id'].astype('int64')
+                
         except FileNotFoundError:
             print("Error: 'aggregated_brain_scan_data.csv' not found. Set aggregate=False to build it.")
             return None
     else:
-        # --- BUILD DATA FROM SCRATCH (aggregate=False) ---
+        
+        # Create a temporary directory for Parquet files
+        temp_parquet_dir = Path(local_cache_dir) / 'temp_parquet_data'
+        temp_parquet_dir.mkdir(exist_ok=True)
+        print(f"Using temporary Parquet directory: {temp_parquet_dir}")
+
+        processed_files = []
+        
         for participant_id in demographic_data['participant_id']:
             
-            participant_id = str(participant_id)
-            print(f"\nProcessing participant: {participant_id}")
+            pid_str = str(participant_id)
+            print(f"\nProcessing participant: {pid_str}")
             
-            # Load the FreeSurfer data for the current participant
-            subject_df = load_fsdata(participant_id, local_cache_dir)
+            # Load the FreeSurfer data (subject_id is already int64 here)
+            subject_df = load_fsdata(pid_str, local_cache_dir)
             
             if subject_df is not None:
-                brain_scan_data_list.append(subject_df)
+                # Save subject data directly to disk as Parquet
+                temp_file = temp_parquet_dir / f'sub_{pid_str}.parquet'
+                subject_df.to_parquet(temp_file)
+                processed_files.append(temp_file)
                 
-        # Concatenate all collected DataFrames into a single one
-        if brain_scan_data_list:
-            brain_scan_data = pd.concat(brain_scan_data_list, ignore_index=True)
+            # Manually trigger garbage collection after processing each participant
+            del subject_df 
+            gc.collect() 
+
+        # Efficiently read all temporary files into one DataFrame
+        if processed_files:
+            print("\nReading temporary Parquet files and concatenating...")
+            brain_scan_data = pd.concat(
+                [pd.read_parquet(f) for f in processed_files], 
+                ignore_index=True
+            )
         else:
             print("No brain scan data was loaded. Cannot merge.")
             return None
             
-        # This aligns the demographics key ('subject_id') with the loaded data key ('subject_id')
+        # Clean up temporary files
+        for f in temp_parquet_dir.glob("*.parquet"):
+            f.unlink()
+        temp_parquet_dir.rmdir()
+        print("Cleaned up temporary files.")
+
+        # Align the demographic merge key with the loaded brain scan data key
         demographic_data.rename(columns={'participant_id': 'subject_id'}, inplace=True)
-            
+        
     # --- Final Merge ---
     
     if aggregate:
+        # Merge on 'participant_id' (both int64)
         merged_df = pd.merge(demographic_data, brain_scan_data, on='participant_id')
     else:
+        # Merge on 'subject_id' (both int64, after renaming)
         merged_df = pd.merge(demographic_data, brain_scan_data, on='subject_id')
     
     # --- Final Data Saving ---
@@ -106,22 +144,18 @@ def merge_data(aggregate):
         print(f"\nSuccessfully merged and saved data to: {output_filename} (CSV)")
     else:
         zarr_path = 'merged_data.zarr'
-        # Assuming merged_df.to_xarray() works and necessary libraries (xarray) are installed
+        # Final, large memory step: conversion and Zarr save
         merged_df.to_xarray().to_zarr(zarr_path, mode='w')
         print(f"\nSuccessfully merged and saved data to: {zarr_path} (Zarr)")
         
     return merged_df
 
 def main():
-    # --- Execute the non-aggregated version (runs the 'else' blocks) ---
+    # --- Execute the non-aggregated version (runs the memory-efficient path) ---
     final_df_built = merge_data(aggregate=False)
-    print("Non-Aggregated Data Head:")
-    print(final_df_built.head())
+    if final_df_built is not None:
+        print("Non-Aggregated Data Head:")
+        print(final_df_built.head())
     
-    # --- Execute the aggregated version (runs the 'if' blocks) ---
-    # final_df_agg = merge_data(aggregate=True)
-    # print("\nAggregated Data Head:")
-    # print(final_df_agg.head())
-
 if __name__ == "__main__":
     main()
