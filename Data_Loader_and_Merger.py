@@ -22,12 +22,21 @@ def load_fsdata(participant_id, local_cache_dir):
         # Open and read the TSV file from the cloud/cache
         with tsv_path.open('r') as f:
             data = pd.read_csv(f, sep='\t')
+            
+        # Clean and convert the 'subject_id' string column to integer
+        if 'subject_id' in data.columns:
+            # 1. Remove the "sub-" prefix
+            data['subject_id'] = data['subject_id'].str.replace('sub-', '')
+            
+            # 2. Convert the resulting string to an integer
+            data['subject_id'] = data['subject_id'].astype('int64')
+            
         return data
     except Exception as e:
         print(f"Error loading FreeSurfer data for sub-{participant_id}: {e}")
         return None
 
-def merge_data(aggregate=True):
+def merge_data(aggregate):
     
     # --- Configuration (Define paths and cache) ---
     rbcdata_path = Path('/home/jovyan/shared/data/RBC')
@@ -104,8 +113,15 @@ def merge_data(aggregate=True):
     return merged_df
 
 def main():
-    final_df = merge_data(aggregate=True)
-    print(final_df.head())
+    # --- Execute the non-aggregated version (runs the 'else' blocks) ---
+    final_df_built = merge_data(aggregate=False)
+    print("Non-Aggregated Data Head:")
+    print(final_df_built.head())
+    
+    # --- Execute the aggregated version (runs the 'if' blocks) ---
+    # final_df_agg = merge_data(aggregate=True)
+    # print("\nAggregated Data Head:")
+    # print(final_df_agg.head())
 
 if __name__ == "__main__":
     main()
